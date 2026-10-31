@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8" /></head>
+<h1>Instrumentation Results for radar_mult_core_mex</h1>
+<h2>Summary</h2>
+<p>To re-create this report:</p>
+<pre>  showInstrumentationResults radar_mult_core_mex -proposeFL -defaultDT numerictype(1,32)</pre>
+
+<p>MEX-function name:</p>
+<pre>radar_mult_core_mex</pre>
+<p>Timestamp:</p>
+<pre>Sat Oct 31 01:57:14 2026</pre>
+<p>To open this report from the MATLAB command line:</p>
+<pre> web('-browser','D:\Study\Digital_IC\Graduation Project\ISAC-Transceiver-for-5G-6G-Networks\MATLAB_modeling\radar_rx\instrumentation\radar_mult_core_mex\html\printable.html')</pre>
+
+
+<h2>Function radar_mult_core </h2>
+
+<pre>
+function Y = radar_mult_core(R, S, T) %#codegen
+% Core algorithm 1 (deck step 1): conjugate -> complex multiplier.
+%   R : echo spectrum   (N x 1 complex, in the order the FFT outputs it)
+%   S : reference chirp spectrum, SAME order as R (the TX FFT output)
+%   Y : R .* conj(S), same order, cast to T.Y (IFFT input format)
+% Both inputs stay in the FFT's bit-reversed order: the multiplier is
+% element-wise, so it needs no reordering as long as R and S match.
+
+Sc = radar_conj(S, T);
+Y  = radar_cmult(R, Sc, T);
+end
+</pre>
+<table style="border-collapse: collapse; border: solid;" border="1">
+<caption><b>Logged Variables for radar_mult_core</b></caption>
+<tr><th>Variable</th><th>Type</th><th>Size</th><th>Class</th><th>Complex</th><th>Signedness</th><th>WL</th><th>FL</th><th>Percent of<br>Current Range</th><th>Always<br>Whole Number</th><th>SimMin</th><th>SimMax</th></tr>
+<tr><td><code>R</code></td><td><code>Input</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code>33</code></td><td><code>No</code></td><td><code>-165.9375</code></td><td><code>164.875</code></td></tr>
+<tr><td><code>S</code></td><td><code>Input</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.25</code></td><td><code>59.1875</code></td></tr>
+<tr><td><code>Sc</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.9375</code></td><td><code>59.1875</code></td></tr>
+<tr><td><code>Y</code></td><td><code>Output</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>1</code></td><td><code><span style="background-color: yellow"><span style="color: black"><b>100</b></span></span></code></td><td><code>No</code></td><td><code>-4096</code></td><td><code>4095.5</code></td></tr>
+</table>
+
+<h2>Function radar_conj </h2>
+
+<pre>
+function Sc = radar_conj(S, T) %#codegen
+% "Conjugate" block: (a + jb) -> (a - jb). Only the imaginary part changes.
+% In RTL this is a negation of the Q word (or a ROM that already stores the
+% conjugate, or just a sign change in the multiplier adders).
+% Note: negating the most negative value (-2^(W-1)) saturates to +max.
+
+N  = numel(S);
+Sc = cast(complex(zeros(N,1)), 'like', T.Sc);
+for i = 1:N
+    re = real(S(i));
+    im = imag(S(i));
+    Sc(i) = complex(cast(re, 'like', T.Sc), cast(-im, 'like', T.Sc));
+end
+end
+</pre>
+<table style="border-collapse: collapse; border: solid;" border="1">
+<caption><b>Logged Variables for radar_conj</b></caption>
+<tr><th>Variable</th><th>Type</th><th>Size</th><th>Class</th><th>Complex</th><th>Signedness</th><th>WL</th><th>FL</th><th>Proposed<br>Signedness</th><th>Proposed<br>WL</th><th>Proposed<br>FL</th><th>Percent of<br>Current Range</th><th>Always<br>Whole Number</th><th>SimMin</th><th>SimMax</th></tr>
+<tr><td><code>N</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>4096</code></td><td><code>4096</code></td></tr>
+<tr><td><code>S</code></td><td><code>Input</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.25</code></td><td><code>59.1875</code></td></tr>
+<tr><td><code>Sc</code></td><td><code>Output</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.9375</code></td><td><code>59.1875</code></td></tr>
+<tr><td><code>i</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>1</code></td><td><code>4096</code></td></tr>
+<tr><td><code>im</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.0625</code></td><td><code>58.9375</code></td></tr>
+<tr><td><code>re</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.25</code></td><td><code>59.1875</code></td></tr>
+</table>
+
+<h2>Function radar_cmult </h2>
+
+<pre>
+function Y = radar_cmult(R, Sc, T) %#codegen
+% "Multiplier" block: element-wise complex multiply, bin k meets bin k.
+%   (a + jb) * (c + jd) = (ac - bd) + j(ad + bc)      -> 4 multipliers, 2 adders
+% Products and sums stay in full precision; one cast (Floor + saturate) to
+% T.Y at the end, like the single truncation stage in the RTL.
+
+N = numel(R);
+Y = cast(complex(zeros(N,1)), 'like', T.Y);
+for i = 1:N
+    a = real(R(i));   b = imag(R(i));
+    c = real(Sc(i));  d = imag(Sc(i));
+
+    ac = a * c;
+    bd = b * d;
+    ad = a * d;
+    bc = b * c;
+
+    y_re = ac - bd;
+    y_im = ad + bc;
+
+    Y(i) = complex(cast(y_re, 'like', T.Y), cast(y_im, 'like', T.Y));
+end
+end
+</pre>
+<table style="border-collapse: collapse; border: solid;" border="1">
+<caption><b>Logged Variables for radar_cmult</b></caption>
+<tr><th>Variable</th><th>Type</th><th>Size</th><th>Class</th><th>Complex</th><th>Signedness</th><th>WL</th><th>FL</th><th>Proposed<br>Signedness</th><th>Proposed<br>WL</th><th>Proposed<br>FL</th><th>Percent of<br>Current Range</th><th>Always<br>Whole Number</th><th>SimMin</th><th>SimMax</th></tr>
+<tr><td><code>N</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>4096</code></td><td><code>4096</code></td></tr>
+<tr><td><code>R</code></td><td><code>Input</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>33</code></td><td><code>No</code></td><td><code>-165.9375</code></td><td><code>164.875</code></td></tr>
+<tr><td><code>Sc</code></td><td><code>Input</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.9375</code></td><td><code>59.1875</code></td></tr>
+<tr><td><code>Y</code></td><td><code>Output</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>1</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code><span style="background-color: yellow"><span style="color: black"><b>100</b></span></span></code></td><td><code>No</code></td><td><code>-4096</code></td><td><code>4095.5</code></td></tr>
+<tr><td><code>a</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>33</code></td><td><code>No</code></td><td><code>-165.9375</code></td><td><code>164.875</code></td></tr>
+<tr><td><code>ac</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>28</code></td><td><code>8</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-8195.46875</code></td><td><code>7670.2734375</code></td></tr>
+<tr><td><code>ad</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>28</code></td><td><code>8</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-6387.84375</code></td><td><code>7394.765625</code></td></tr>
+<tr><td><code>b</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>30</code></td><td><code>No</code></td><td><code>-152.1875</code></td><td><code>149.375</code></td></tr>
+<tr><td><code>bc</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>28</code></td><td><code>8</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-6962.3046875</code></td><td><code>7483.90625</code></td></tr>
+<tr><td><code>bd</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>28</code></td><td><code>8</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-6741.97265625</code></td><td><code>6499.03125</code></td></tr>
+<tr><td><code>c</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.25</code></td><td><code>59.1875</code></td></tr>
+<tr><td><code>d</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>14</code></td><td><code>4</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>12</code></td><td><code>No</code></td><td><code>-58.9375</code></td><td><code>58.0625</code></td></tr>
+<tr><td><code>i</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>1</code></td><td><code>4096</code></td></tr>
+<tr><td><code>y_im</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>29</code></td><td><code>8</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-7528.15234375</code></td><td><code>9608.1484375</code></td></tr>
+<tr><td><code>y_re</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>29</code></td><td><code>8</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-8198.421875</code></td><td><code>7783.95703125</code></td></tr>
+</table>
+</html>
