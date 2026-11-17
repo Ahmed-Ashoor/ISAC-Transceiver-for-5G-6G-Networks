@@ -41,21 +41,21 @@ switch dt
         %using a custom fimath to match the rtl truncating of bits instead
         %of default rounding to nearest
         fm = fimath('RoundingMethod','Floor');
-        T.x     = fi([], 1, 4+10, 10, fm);
-        T.WN    = fi([], 1, 2+12, 12, fm);
-        T.stg1  = fi([], 1, 4+10, 10, fm);
-        T.stg2  = fi([], 1, 5+9, 9, fm);
-        T.stg3  = fi([], 1, 5+9, 9, fm);
-        T.stg4  = fi([], 1, 6+8, 8, fm);
-        T.stg5  = fi([], 1, 6+8, 8, fm);
-        T.stg6  = fi([], 1, 7+7, 7, fm);
-        T.stg7  = fi([], 1, 7+7, 7, fm);
-        T.stg8  = fi([], 1, 8+6, 6, fm);
-        T.stg9  = fi([], 1, 8+6, 6, fm);
-        T.stg10 = fi([], 1, 9+5, 5, fm);
-        T.stg11 = fi([], 1, 9+5, 5, fm);
-        T.stg12 = fi([], 1, 10+4, 4, fm);
-        T.y     = fi([], 1, 10+4, 4, fm);
+        T.x     = fi([], 1, 4+8, 8, fm);
+        T.WN    = fi([], 1, 2+14, 14, fm);
+        T.stg1  = fi([], 1, 4+12, 12, fm);
+        T.stg2  = fi([], 1, 5+11, 11, fm);
+        T.stg3  = fi([], 1, 5+11, 11, fm);
+        T.stg4  = fi([], 1, 6+10, 10, fm);
+        T.stg5  = fi([], 1, 6+10, 10, fm);
+        T.stg6  = fi([], 1, 7+9, 9, fm);
+        T.stg7  = fi([], 1, 7+9, 9, fm);
+        T.stg8  = fi([], 1, 8+8, 8, fm);
+        T.stg9  = fi([], 1, 8+8, 8, fm);
+        T.stg10 = fi([], 1, 9+7, 7, fm);
+        T.stg11 = fi([], 1, 9+7, 7, fm);
+        T.stg12 = fi([], 1, 10+6, 6, fm);
+        T.y     = fi([], 1, 10+6, 6, fm);
 end
 
 end

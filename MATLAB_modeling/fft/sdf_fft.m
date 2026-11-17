@@ -1,7 +1,7 @@
 function y = sdf_fft(x, T) %#codegen
 
 N  = 4096;
-x  = cast(x, 'like', T.x);
+%x  = cast(x, 'like', T.x);
 
 % twiddle ROM in hardware
 idxVec         = (0:2047).';

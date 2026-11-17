@@ -24,12 +24,12 @@ for seed = 1:nSeeds
     y = sdf_fft_mex(x, T);
     
     %bitreversal
-    y_ref = fft(x_double);
+    y_ref = fft(double(x));
     perm  = bitrevorder(0:N-1);
     yCorrected = zeros(N,1);
     yCorrected(perm+1) = y;
 
-    error(seed) = mean(abs(yCorrected - y_ref));
+    error(seed) = mean(abs(yCorrected - y_ref)./abs(y_ref))*100;
     signal_power   = mean(abs(y_ref).^2);
     noise_power    = mean(abs(yCorrected - y_ref).^2);
     sqnr_dB(seed)  = 10*log10(signal_power / noise_power);
@@ -58,7 +58,7 @@ end
 avg_error   = mean(error);
 avg_sqnr_dB = mean(sqnr_dB);
 
-fprintf('average error = %e\n', avg_error);
+fprintf('average error percentage = %.4f %%\n', avg_error);
 fprintf('average sqnr = %.2f dB\n', avg_sqnr_dB);
 
 figure; plot(1:nSeeds, error, 'LineWidth', 2); grid on;
