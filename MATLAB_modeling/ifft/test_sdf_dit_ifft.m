@@ -1,0 +1,73 @@
+close all;
+N = 4096;
+nSeeds = 1000;
+
+T = sdf_dit_ifft_data_types('FxPt');
+
+
+error = zeros(nSeeds,1);
+sqnr_dB = zeros(nSeeds,1);
+
+% Open files for writing
+% fid_in  = fopen('ifft_inputs.txt','w');
+% fid_out = fopen('ifft_outputs.txt','w');
+
+perm  = bitrevorder(0:N-1);
+
+for seed = 1:nSeeds
+    rng(seed);
+
+    x_double = randn(N,1) + 1i*randn(N,1);
+    x =cast(x_double, 'like', T.x);
+    
+    %bitreversal of the input, the dit core takes bit-reversed order in
+    x_br = x(perm+1);
+    
+    if seed == 1
+    buildInstrumentedMex sdf_dit_ifft -args {x_br, T};
+    end
+    
+    y = sdf_dit_ifft_mex(x_br, T);
+    
+    % natural order out, no output reordering needed
+    y_ref = ifft(double(x));
+    yCorrected = double(y);
+
+    error(seed) = mean(abs(yCorrected - y_ref)./abs(y_ref))*100;
+    signal_power   = mean(abs(y_ref).^2);
+    noise_power    = mean(abs(yCorrected - y_ref).^2);
+    sqnr_dB(seed)  = 10*log10(signal_power / noise_power);
+    
+    % Write inputs and outputs to files
+%     for k = 1:N
+%         % Input: bit-reversed order, real and imag parts in hex
+%         in_real_hex = hex(real(x_br(k)));
+%         in_imag_hex = hex(imag(x_br(k)));
+% 
+%         % Output: natural order, real and imag parts in hex
+%         out_real_hex = hex(real(y(k)));
+%         out_imag_hex = hex(imag(y(k)));
+% 
+%         % Write to files (each line: real_hex imag_hex)
+%         fprintf(fid_in,  '%s %s\n', in_real_hex, in_imag_hex);
+%         fprintf(fid_out, '%s %s\n', out_real_hex, out_imag_hex);
+%     end
+end
+
+% fclose(fid_in);
+% fclose(fid_out);
+
+% write_twiddles_hex_dit(T, N);
+
+avg_error   = mean(error);
+avg_sqnr_dB = mean(sqnr_dB);
+
+fprintf('average error percentage = %.4f %%\n', avg_error);
+fprintf('average sqnr = %.2f dB\n', avg_sqnr_dB);
+
+figure; plot(1:nSeeds, error, 'LineWidth', 2); grid on;
+xlabel('Seed', 'FontSize', 14); ylabel('Error', 'FontSize', 14);
+
+figure; plot(1:nSeeds, sqnr_dB, 'LineWidth', 2); grid on;
+xlabel('Seed', 'FontSize', 14); ylabel('SQNR (dB)', 'FontSize', 14);
+showInstrumentationResults sdf_dit_ifft_mex -proposeFL -defaultDT numerictype(1,32)
