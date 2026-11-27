@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8" /></head>
+<h1>Instrumentation Results for radar_rx_mex</h1>
+<h2>Summary</h2>
+<p>To re-create this report:</p>
+<pre>  showInstrumentationResults radar_rx_mex -proposeFL -defaultDT numerictype(1,32)</pre>
+
+<p>MEX-function name:</p>
+<pre>radar_rx_mex</pre>
+<p>Timestamp:</p>
+<pre>Fri Nov 27 20:45:05 2026</pre>
+<p>To open this report from the MATLAB command line:</p>
+<pre> web('-browser','D:\desktop_files\Uni Shit\GP\MATLAB_modeling\full_test\instrumentation\radar_rx_mex\html\printable.html')</pre>
+
+
+<h2>Function radar_rx </h2>
+
+<pre>
+function [Y, yi, npk, pk_idx, pk_mag, pk_dist, ovf] = radar_rx(R, C, T, P) %#codegen
+% Radar RX path after the FFT (see gp_basis.pdf):
+%   conjugate -> multiplier -> IFFT -> magnitude -> peak detection -> distance
+%
+%   R : N x 1 complex  echo spectrum, straight from the FFT (BIT-REVERSED stream order)
+%   C : N x 1 complex  chirp reference ROM, SAME stream order as R,
+%                      unit magnitude on sensing bins and 0 on the comm bins
+%   T : types table (radar_rx_data_types)
+%   P : parameter struct, passed as a compile-time constant (see test_isac_system.m)
+%
+%   Y       : multiplier output (goes to the IFFT, still bit-reversed order)
+%   yi      : IFFT output (natural order)
+%   npk     : number of peaks found (objects)
+%   pk_idx  : delay index of each peak (0-based, uint16)
+%   pk_mag  : magnitude (or power) of each peak
+%   pk_dist : distance of each peak in metres
+%   ovf     : more than P.MAXPK peaks were found
+
+N  = 4096;
+sc = 2^-P.shift;      % Y = R*conj(C) * 2^-shift  (binary point move in the rtl)
+
+R = cast(R, 'like', T.R);
+C = cast(C, 'like', T.C);
+
+%% 1) conjugate: (a + jb) -> (a - jb)
+Sc = cast(complex(zeros(N,1)), 'like', T.Sc);
+for i = 1:N
+    Sc(i) = complex(cast(real(C(i)), 'like', T.Sc), cast(-imag(C(i)), 'like', T.Sc));
+end
+
+%% 2) complex multiplier, bin k meets bin k:  (a+jb)(c+jd) = (ac-bd) + j(ad+bc)
+% full precision products and sums, one truncation at the end
+Y = cast(complex(zeros(N,1)), 'like', T.Y);
+for i = 1:N
+    xr = real(R(i));    xq = imag(R(i));
+    cr = real(Sc(i));   ci = imag(Sc(i));
+
+    y_re = xr*cr - xq*ci;
+    y_im = xr*ci + xq*cr;
+
+    Y(i) = complex(cast(double(y_re) * sc, 'like', T.Y), cast(double(y_im) * sc, 'like', T.Y));
+end
+
+%% 3) IFFT: bit-reversed in, natural out
+yi = cast(sdf_dit_ifft(cast(Y, 'like', T.ifft.x), T.ifft), 'like', T.yi);
+
+%% 4) magnitude of every IFFT output sample
+mag = cast(zeros(N,1), 'like', T.mag);
+k38 = cast(0.375, 'like', T.k38);
+for n = 1:N
+    re = real(yi(n));
+    im = imag(yi(n));
+    switch P.pmode
+        case 'sq'                       % I^2 + Q^2  (2 multipliers)
+            mag(n) = cast(re*re + im*im, 'like', T.mag);
+        case 'max'                      % max(|I|,|Q|)  (compare + mux only)
+            ma = abs(re);
+            mb = abs(im);
+            if ma > mb
+                mag(n) = cast(ma, 'like', T.mag);
+            else
+                mag(n) = cast(mb, 'like', T.mag);
+            end
+        otherwise                       % 'ambm': max + 3/8*min  (RTL: mx + (mn>>2) + (mn>>3))
+            ma = abs(re);
+            mb = abs(im);
+            if ma > mb
+                mx = ma;  mn = mb;
+            else
+                mx = mb;  mn = ma;
+            end
+            mag(n) = cast(mx + mn*k38, 'like', T.mag);
+    end
+end
+
+%% 5) peak detection: local maximum (sample vs previous and next) + CA-CFAR threshold
+%    only inside the search window [P.imin, P.imax] (CP-limited range, leakage blanked)
+kcf     = cast(P.kcfar / (2*P.NT), 'like', T.kcf);
+pk_idx  = zeros(P.MAXPK, 1, 'uint16');
+pk_mag  = cast(zeros(P.MAXPK, 1), 'like', T.mag);
+npk     = uint8(0);
+ovf     = false;
+
+for n = (P.imin + 1) : (P.imax + 1)            % MATLAB index n  <->  delay index n-1
+    m0 = mag(n);
+    if m0 > mag(n-1) && m0 >= mag(n+1)         % '>' on one side only: a plateau gives one peak
+        % training cells: NT on each side, skipping NG guard cells
+        s = cast(0, 'like', T.sum);
+        for j = (P.NG + 1) : (P.NG + P.NT)
+            s = cast(s + mag(n-j) + mag(n+j), 'like', T.sum);
+        end
+        thr = cast(s * kcf, 'like', T.mag);    % mean of training cells * K_cfar
+        if m0 > thr
+            if npk < P.MAXPK
+                npk         = npk + 1;
+                pk_idx(npk) = uint16(n - 1);
+                pk_mag(npk) = m0;
+            else
+                ovf = true;
+            end
+        end
+    end
+end
+
+%% 6) distance = index * c/(2*fs)   (one multiplication by a constant)
+Kc      = cast(P.K, 'like', T.K);
+pk_dist = cast(zeros(P.MAXPK, 1), 'like', T.dist);
+for q = 1:P.MAXPK
+    iq         = cast(pk_idx(q), 'like', T.idx);
+    pk_dist(q) = cast(iq * Kc, 'like', T.dist);
+end
+
+end
+</pre>
+<table style="border-collapse: collapse; border: solid;" border="1">
+<caption><b>Logged Variables for radar_rx</b></caption>
+<tr><th>Variable</th><th>Type</th><th>Size</th><th>Class</th><th>Complex</th><th>Signedness</th><th>WL</th><th>FL</th><th>Proposed<br>Signedness</th><th>Proposed<br>WL</th><th>Proposed<br>FL</th><th>Percent of<br>Current Range</th><th>Always<br>Whole Number</th><th>SimMin</th><th>SimMax</th></tr>
+<tr><td><code>C</code></td><td><code>Input</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>51</code></td><td><code>No</code></td><td><code>-1</code></td><td><code>1</code></td></tr>
+<tr><td><code>Kc</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>20</code></td><td><code>18</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>31</code></td><td><code>No</code></td><td><code>1.2198562622070313</code></td><td><code>1.2198562622070313</code></td></tr>
+<tr><td><code>N</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>4096</code></td><td><code>4096</code></td></tr>
+<tr><td><code>P</code></td><td><code>Input</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>struct</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td></tr>
+<tr><td><code>P.shift</code></td><td><code>Field</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>8</code></td><td><code>8</code></td></tr>
+<tr><td><code>P.MAXPK</code></td><td><code>Field</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>8</code></td><td><code>8</code></td></tr>
+<tr><td><code>P.NG</code></td><td><code>Field</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>1</code></td><td><code>1</code></td></tr>
+<tr><td><code>P.NT</code></td><td><code>Field</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>8</code></td><td><code>8</code></td></tr>
+<tr><td><code>P.imin</code></td><td><code>Field</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>12</code></td><td><code>12</code></td></tr>
+<tr><td><code>P.imax</code></td><td><code>Field</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>288</code></td><td><code>288</code></td></tr>
+<tr><td><code>P.kcfar</code></td><td><code>Field</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>5</code></td><td><code>5</code></td></tr>
+<tr><td><code>P.K</code></td><td><code>Field</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>30</code></td><td><code></code></td><td><code>No</code></td><td><code>1.2198586344401041</code></td><td><code>1.2198586344401041</code></td></tr>
+<tr><td><code>R</code></td><td><code>Input</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>6</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-9.640625</code></td><td><code>2.65625</code></td></tr>
+<tr><td><code>Sc</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>51</code></td><td><code>No</code></td><td><code>-1</code></td><td><code>1</code></td></tr>
+<tr><td><code>Y</code></td><td><code>Output</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>12</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.031982421875</code></td><td><code>0.03759765625</code></td></tr>
+<tr><td><code>ci</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>51</code></td><td><code>No</code></td><td><code>-1</code></td><td><code>1</code></td></tr>
+<tr><td><code>cr</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>51</code></td><td><code>No</code></td><td><code>-0.9996337890625</code></td><td><code>1</code></td></tr>
+<tr><td><code>i</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>1</code></td><td><code>4096</code></td></tr>
+<tr><td><code>im</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.0003662109375</code></td><td><code>0.00042724609375</code></td></tr>
+<tr><td><code>iq</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>12</code></td><td><code>0</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>3</code></td><td><code><b>Yes</b></code></td><td><code>0</code></td><td><code>120</code></td></tr>
+<tr><td><code>j</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>2</code></td><td><code>9</code></td></tr>
+<tr><td><code>k38</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>3</code></td><td><code>3</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>43</code></td><td><code>No</code></td><td><code>0.375</code></td><td><code>0.375</code></td></tr>
+<tr><td><code>kcf</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>8</code></td><td><code>6</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>8</code></td><td><code>No</code></td><td><code>0.3125</code></td><td><code>0.3125</code></td></tr>
+<tr><td><code>m0</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>0</code></td><td><code>0.000732421875</code></td></tr>
+<tr><td><code>ma</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>0</code></td><td><code>0.00146484375</code></td></tr>
+<tr><td><code>mag</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>0</code></td><td><code>0.00146484375</code></td></tr>
+<tr><td><code>mb</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>0</code></td><td><code>0.00042724609375</code></td></tr>
+<tr><td><code>mn</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>0</code></td><td><code>0.00042724609375</code></td></tr>
+<tr><td><code>mx</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>0</code></td><td><code>0.00146484375</code></td></tr>
+<tr><td><code>n</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>1</code></td><td><code>4096</code></td></tr>
+<tr><td><code>npk</code></td><td><code>Output</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>uint8</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>0</code></td><td><code>2</code></td></tr>
+<tr><td><code>ovf</code></td><td><code>Output</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>logical</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>0</code></td><td><code>0</code></td></tr>
+<tr><td><code>pk_dist</code></td><td><code>Output</code></td><td><code><b>:</b>?&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>16</code></td><td><code>3</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>0</code></td><td><code>146.375</code></td></tr>
+<tr><td><code>pk_idx</code></td><td><code>Output</code></td><td><code><b>:</b>?&nbsp;x&nbsp;1</code></td><td><code>uint16</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>0</code></td><td><code>120</code></td></tr>
+<tr><td><code>pk_mag</code></td><td><code>Output</code></td><td><code><b>:</b>?&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>0</code></td><td><code>0.000732421875</code></td></tr>
+<tr><td><code>q</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>1</code></td><td><code>8</code></td></tr>
+<tr><td><code>re</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-0.0003662109375</code></td><td><code>0.00146484375</code></td></tr>
+<tr><td><code>s</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>16</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>0</code></td><td><code>0.00201416015625</code></td></tr>
+<tr><td><code>sc</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>38</code></td><td><code></code></td><td><code>No</code></td><td><code>0.00390625</code></td><td><code>0.00390625</code></td></tr>
+<tr><td><code>thr</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Unsigned</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>0.0001220703125</code></td><td><code>0.0006103515625</code></td></tr>
+<tr><td><code>xq</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>6</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-9.640625</code></td><td><code>2.65625</code></td></tr>
+<tr><td><code>xr</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>6</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-8.15625</code></td><td><code>2.578125</code></td></tr>
+<tr><td><code>y_im</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>33</code></td><td><code>20</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-8.15625</code></td><td><code>1.086874008178711</code></td></tr>
+<tr><td><code>y_re</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>No</code></td><td><code>Signed</code></td><td><code>33</code></td><td><code>20</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.10291481018066406</code></td><td><code>9.640625</code></td></tr>
+<tr><td><code>yi</code></td><td><code>Output</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-0.0003662109375</code></td><td><code>0.00146484375</code></td></tr>
+</table>
+
+<h2>Function sdf_dit_ifft </h2>
+
+<pre>
+function y = sdf_dit_ifft(x, T) %#codegen
+
+N  = 4096;
+sc = 1/N;
+% ifft(x) = swap(fft(swap(x))) / N, with swap exchanging the real and imaginary parts
+% dit core: bit-reversed order in, natural order out
+% 1/N = 2^-12, applied at the output as a binary point move (no bits lost)
+
+% flip I and Q at the input (no shift, the input is already at the level the stages were sized for)
+
+% twiddle ROM in hardware
+idxVec         = (0:2047).';
+twTable_double = exp(+1i * 2 * pi * idxVec / N);   % double
+twTable        = cast(twTable_double, 'like', T.WN);   % casting
+
+
+
+
+
+%stage 1: period=2, half=1 (twiddle always 1 -- no multiply/cast needed)
+stg_1 = cast(complex(zeros(4096,1)), 'like', T.stg1);
+for i = 1:4096
+    p = mod(i-1, 2);
+    if p < 1
+        stg_1(i) = cast(x(i) + x(i + 1), 'like', T.stg1);
+    else
+        stg_1(i) = cast(x(i - 1) - x(i), 'like', T.stg1);
+    end
+end
+
+%stage 2: period=4, half=2, exponent step = 2^10 = 1024
+stg_2 = cast(complex(zeros(4096,1)), 'like', T.stg2);
+for i = 1:4096
+    p = mod(i-1, 4);
+    if p < 2
+        n  = p;
+        Wp = twTable(1024*n + 1);      % WN^(1024*n)
+        stg_2(i) = cast(stg_1(i) + stg_1(i + 2) * Wp, 'like', T.stg2);
+    else
+        n  = p - 2;
+        Wp = twTable(1024*n + 1);      % WN^(1024*n)
+        stg_2(i) = cast(stg_1(i - 2) - stg_1(i) * Wp, 'like', T.stg2);
+    end
+end
+
+%stage 3: period=8, half=4, exponent step = 2^9 = 512
+stg_3 = cast(complex(zeros(4096,1)), 'like', T.stg3);
+for i = 1:4096
+    p = mod(i-1, 8);
+    if p < 4
+        n  = p;
+        Wp = twTable(512*n + 1);       % WN^(512*n)
+        stg_3(i) = cast(stg_2(i) + stg_2(i + 4) * Wp, 'like', T.stg3);
+    else
+        n  = p - 4;
+        Wp = twTable(512*n + 1);       % WN^(512*n)
+        stg_3(i) = cast(stg_2(i - 4) - stg_2(i) * Wp, 'like', T.stg3);
+    end
+end
+
+%stage 4: period=16, half=8, exponent step = 2^8 = 256
+stg_4 = cast(complex(zeros(4096,1)), 'like', T.stg4);
+for i = 1:4096
+    p = mod(i-1, 16);
+    if p < 8
+        n  = p;
+        Wp = twTable(256*n + 1);       % WN^(256*n)
+        stg_4(i) = cast(stg_3(i) + stg_3(i + 8) * Wp, 'like', T.stg4);
+    else
+        n  = p - 8;
+        Wp = twTable(256*n + 1);       % WN^(256*n)
+        stg_4(i) = cast(stg_3(i - 8) - stg_3(i) * Wp, 'like', T.stg4);
+    end
+end
+
+%stage 5: period=32, half=16, exponent step = 2^7 = 128
+stg_5 = cast(complex(zeros(4096,1)), 'like', T.stg5);
+for i = 1:4096
+    p = mod(i-1, 32);
+    if p < 16
+        n  = p;
+        Wp = twTable(128*n + 1);       % WN^(128*n)
+        stg_5(i) = cast(stg_4(i) + stg_4(i + 16) * Wp, 'like', T.stg5);
+    else
+        n  = p - 16;
+        Wp = twTable(128*n + 1);       % WN^(128*n)
+        stg_5(i) = cast(stg_4(i - 16) - stg_4(i) * Wp, 'like', T.stg5);
+    end
+end
+
+%stage 6: period=64, half=32, exponent step = 2^6 = 64
+stg_6 = cast(complex(zeros(4096,1)), 'like', T.stg6);
+for i = 1:4096
+    p = mod(i-1, 64);
+    if p < 32
+        n  = p;
+        Wp = twTable(64*n + 1);        % WN^(64*n)
+        stg_6(i) = cast(stg_5(i) + stg_5(i + 32) * Wp, 'like', T.stg6);
+    else
+        n  = p - 32;
+        Wp = twTable(64*n + 1);        % WN^(64*n)
+        stg_6(i) = cast(stg_5(i - 32) - stg_5(i) * Wp, 'like', T.stg6);
+    end
+end
+
+%stage 7: period=128, half=64, exponent step = 2^5 = 32
+stg_7 = cast(complex(zeros(4096,1)), 'like', T.stg7);
+for i = 1:4096
+    p = mod(i-1, 128);
+    if p < 64
+        n  = p;
+        Wp = twTable(32*n + 1);        % WN^(32*n)
+        stg_7(i) = cast(stg_6(i) + stg_6(i + 64) * Wp, 'like', T.stg7);
+    else
+        n  = p - 64;
+        Wp = twTable(32*n + 1);        % WN^(32*n)
+        stg_7(i) = cast(stg_6(i - 64) - stg_6(i) * Wp, 'like', T.stg7);
+    end
+end
+
+%stage 8: period=256, half=128, exponent step = 2^4 = 16
+stg_8 = cast(complex(zeros(4096,1)), 'like', T.stg8);
+for i = 1:4096
+    p = mod(i-1, 256);
+    if p < 128
+        n  = p;
+        Wp = twTable(16*n + 1);        % WN^(16*n)
+        stg_8(i) = cast(stg_7(i) + stg_7(i + 128) * Wp, 'like', T.stg8);
+    else
+        n  = p - 128;
+        Wp = twTable(16*n + 1);        % WN^(16*n)
+        stg_8(i) = cast(stg_7(i - 128) - stg_7(i) * Wp, 'like', T.stg8);
+    end
+end
+
+%stage 9: period=512, half=256, exponent step = 2^3 = 8
+stg_9 = cast(complex(zeros(4096,1)), 'like', T.stg9);
+for i = 1:4096
+    p = mod(i-1, 512);
+    if p < 256
+        n  = p;
+        Wp = twTable(8*n + 1);         % WN^(8*n)
+        stg_9(i) = cast(stg_8(i) + stg_8(i + 256) * Wp, 'like', T.stg9);
+    else
+        n  = p - 256;
+        Wp = twTable(8*n + 1);         % WN^(8*n)
+        stg_9(i) = cast(stg_8(i - 256) - stg_8(i) * Wp, 'like', T.stg9);
+    end
+end
+
+%stage 10: period=1024, half=512, exponent step = 2^2 = 4
+stg_10 = cast(complex(zeros(4096,1)), 'like', T.stg10);
+for i = 1:4096
+    p = mod(i-1, 1024);
+    if p < 512
+        n  = p;
+        Wp = twTable(4*n + 1);         % WN^(4*n)
+        stg_10(i) = cast(stg_9(i) + stg_9(i + 512) * Wp, 'like', T.stg10);
+    else
+        n  = p - 512;
+        Wp = twTable(4*n + 1);         % WN^(4*n)
+        stg_10(i) = cast(stg_9(i - 512) - stg_9(i) * Wp, 'like', T.stg10);
+    end
+end
+
+%stage 11: period=2048, half=1024, exponent step = 2^1 = 2
+stg_11 = cast(complex(zeros(4096,1)), 'like', T.stg11);
+for i = 1:4096
+    p = mod(i-1, 2048);
+    if p < 1024
+        n  = p;
+        Wp = twTable(2*n + 1);         % WN^(2*n)
+        stg_11(i) = cast(stg_10(i) + stg_10(i + 1024) * Wp, 'like', T.stg11);
+    else
+        n  = p - 1024;
+        Wp = twTable(2*n + 1);         % WN^(2*n)
+        stg_11(i) = cast(stg_10(i - 1024) - stg_10(i) * Wp, 'like', T.stg11);
+    end
+end
+
+%stage 12: period=4096, half=2048, exponent step = 2^0 = 1
+stg_12 = cast(complex(zeros(4096,1)), 'like', T.stg12);
+for i = 1:4096
+    if i <= 2048
+        n  = i - 1;
+        Wp = twTable(n + 1);           % WN^(1*n)
+        stg_12(i) = cast(stg_11(i) + stg_11(i + 2048) * Wp, 'like', T.stg12);
+    else
+        n  = i - 2049;
+        Wp = twTable(n + 1);           % WN^(1*n)
+        stg_12(i) = cast(stg_11(i - 2048) - stg_11(i) * Wp, 'like', T.stg12);
+    end
+end
+
+%ntOut = numerictype(1, T.y.WordLength, T.y.FractionLength + 12);
+%yc = reinterpretcast(stg_12,ntOut);
+%y =cast(yc, 'like', T.x);
+y = cast(stg_12 .* sc, 'like', T.y);
+end
+</pre>
+<table style="border-collapse: collapse; border: solid;" border="1">
+<caption><b>Logged Variables for sdf_dit_ifft</b></caption>
+<tr><th>Variable</th><th>Type</th><th>Size</th><th>Class</th><th>Complex</th><th>Signedness</th><th>WL</th><th>FL</th><th>Proposed<br>Signedness</th><th>Proposed<br>WL</th><th>Proposed<br>FL</th><th>Percent of<br>Current Range</th><th>Always<br>Whole Number</th><th>SimMin</th><th>SimMax</th></tr>
+<tr><td><code>N</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>4096</code></td><td><code>4096</code></td></tr>
+<tr><td><code>Wp</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>51</code></td><td><code>No</code></td><td><code>-1</code></td><td><code>1</code></td></tr>
+<tr><td><code>i</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>1</code></td><td><code>4096</code></td></tr>
+<tr><td><code>idxVec</code></td><td><code>Local</code></td><td><code>2048&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>0</code></td><td><code>2047</code></td></tr>
+<tr><td><code>n</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>0</code></td><td><code>2047</code></td></tr>
+<tr><td><code>p</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>0</code></td><td><code></code></td><td><code><b>Yes</b></code></td><td><code>0</code></td><td><code>2047</code></td></tr>
+<tr><td><code>sc</code></td><td><code>Local</code></td><td><code>1&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>No</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>42</code></td><td><code></code></td><td><code>No</code></td><td><code>0.000244140625</code></td><td><code>0.000244140625</code></td></tr>
+<tr><td><code>stg_1</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>12</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.031982421875</code></td><td><code>0.03759765625</code></td></tr>
+<tr><td><code>stg_10</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>7</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-0.7578125</code></td><td><code>3.09375</code></td></tr>
+<tr><td><code>stg_11</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>6</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-1.484375</code></td><td><code>6.140625</code></td></tr>
+<tr><td><code>stg_12</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>6</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-1.484375</code></td><td><code>6.140625</code></td></tr>
+<tr><td><code>stg_2</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>11</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.033203125</code></td><td><code>0.04833984375</code></td></tr>
+<tr><td><code>stg_3</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>11</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.03564453125</code></td><td><code>0.06689453125</code></td></tr>
+<tr><td><code>stg_4</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>10</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.0400390625</code></td><td><code>0.083984375</code></td></tr>
+<tr><td><code>stg_5</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>10</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.0615234375</code></td><td><code>0.1298828125</code></td></tr>
+<tr><td><code>stg_6</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>9</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.1171875</code></td><td><code>0.224609375</code></td></tr>
+<tr><td><code>stg_7</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>9</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.1953125</code></td><td><code>0.423828125</code></td></tr>
+<tr><td><code>stg_8</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>8</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.21875</code></td><td><code>0.8046875</code></td></tr>
+<tr><td><code>stg_9</code></td><td><code>Local</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>8</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-0.41796875</code></td><td><code>1.56640625</code></td></tr>
+<tr><td><code>twTable</code></td><td><code>Local</code></td><td><code>2048&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>51</code></td><td><code>No</code></td><td><code>-1</code></td><td><code>1</code></td></tr>
+<tr><td><code>twTable_double</code></td><td><code>Local</code></td><td><code>2048&nbsp;x&nbsp;1</code></td><td><code>double</code></td><td><code>Yes</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>Signed</code></td><td><code>32</code></td><td><code>30</code></td><td><code></code></td><td><code>No</code></td><td><code>-0.9999988234517019</code></td><td><code>1</code></td></tr>
+<tr><td><code>x</code></td><td><code>Input</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>16</code></td><td><code>12</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>< 1</code></td><td><code>No</code></td><td><code>-0.031982421875</code></td><td><code>0.03759765625</code></td></tr>
+<tr><td><code>y</code></td><td><code>Output</code></td><td><code>4096&nbsp;x&nbsp;1</code></td><td><code>embedded.fi</code></td><td><code>Yes</code></td><td><code>Signed</code></td><td><code>12</code></td><td><code>14</code></td><td><code></code></td><td><code></code></td><td><code></code></td><td><code>2</code></td><td><code>No</code></td><td><code>-0.0003662109375</code></td><td><code>0.00146484375</code></td></tr>
+</table>
+</html>
